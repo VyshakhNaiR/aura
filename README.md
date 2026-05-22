@@ -53,7 +53,9 @@ pnpm install
 pnpm dev
 ```
 
-Open **https://localhost:5173/** in Chrome / Edge / Brave / Arc — Firefox & Safari can't reliably capture tab audio. The dev server runs on HTTPS with a self-signed certificate (Spotify OAuth requires HTTPS); on first visit the browser will warn — click **Advanced → Proceed to localhost**. Then click **Try a demo track** to see it move, or **◉ Capture from a tab** to point it at your music.
+Open **http://127.0.0.1:5173/** in Chrome / Edge / Brave / Arc — Firefox & Safari can't reliably capture tab audio. Click **Try a demo track** to see it move, or **◉ Capture from a tab** to point it at your music.
+
+> **Why `127.0.0.1` and not `localhost`?** Spotify dropped support for `http://localhost` redirect URIs in 2025. The loopback IP literal (`127.0.0.1`) is still accepted over plain HTTP — so this is the lowest-friction setup. If you'd rather use HTTPS + `localhost`, run `AURA_HTTPS=1 pnpm dev` and accept the self-signed cert warning once.
 
 Need the toolchain? [Node 20+](https://nodejs.org), then `corepack enable && corepack prepare pnpm@latest --activate`.
 
@@ -129,14 +131,18 @@ aura/
 AURA reads Spotify's still-live `currently-playing` endpoint for title / artist / album art. Audio still comes from tab capture — Spotify can't and won't ship beats anymore.
 
 1. Open [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → **Create app**.
-2. **Redirect URI** must be exactly `https://localhost:5173/` (HTTPS — Spotify dropped plain `http://localhost` support for new apps in 2025).
+2. **Redirect URI** must be one of:
+   - `http://127.0.0.1:5173/`  ← recommended, no cert warning
+   - or `https://localhost:5173/`  ← if you ran `AURA_HTTPS=1 pnpm dev`
 3. Tick **Web API**, save, copy the **Client ID**.
-4. In AURA, click **Connect Spotify (now-playing)** → paste the Client ID → **Connect → Spotify** → Agree.
+4. Open AURA at the matching URL (`http://127.0.0.1:5173/` or `https://localhost:5173/`). Click **Connect Spotify (now-playing)** → paste the Client ID → **Connect → Spotify** → Agree.
 5. Open Spotify Web Player or the desktop app, play a track.
 6. In AURA: **◉ Capture from a tab** → pick the Spotify tab → **tick "Share tab audio"** in the picker.
 7. Track title + artist + album art appear top-left. The kaleidoscope shifts to the album's colors.
 
-> **Fallback if the self-signed HTTPS cert is too annoying:** register `http://127.0.0.1:5173/` as the redirect URI instead (Spotify still accepts plain HTTP on the explicit loopback IP). Then open `http://127.0.0.1:5173/` in your browser. No cert warning, no HTTPS plugin needed.
+> **Important:** the URL you open AURA at must match the redirect URI registered with Spotify *exactly*. AURA derives `redirect_uri` from the current page's origin — so opening at `http://localhost:5173/` and registering `http://127.0.0.1:5173/` (or vice versa) will not match. Use `127.0.0.1` in both places, or `localhost` over HTTPS in both places.
+
+> **`redirect_uri: Insecure` from Spotify's dashboard?** You tried to save `http://localhost:5173/`. Spotify rejects that exact hostname over HTTP. Use `http://127.0.0.1:5173/` instead.
 
 ---
 
