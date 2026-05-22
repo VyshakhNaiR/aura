@@ -100,6 +100,12 @@ export class SpotifyNowPlayingProvider implements NowPlayingProvider {
    *
    * Returns true if a redirect was processed (the caller can immediately
    * start polling).
+   *
+   * Race-safety note: the auth code is single-use, but React StrictMode
+   * (and arguably any concurrent caller) can invoke this twice in dev.
+   * We pop the code out of the URL *synchronously* before awaiting the
+   * token endpoint — any second caller sees an empty URL and returns
+   * early instead of 400ing on a spent code.
    */
   async handleRedirect(): Promise<boolean> {
     const url = new URL(window.location.href);
@@ -108,6 +114,13 @@ export class SpotifyNowPlayingProvider implements NowPlayingProvider {
 
     const verifier = localStorage.getItem(LS_VERIFIER);
     if (!verifier) return false;
+
+    // CRITICAL: clear the code from URL + storage synchronously, before
+    // any awaits. This is what makes the second concurrent call a no-op.
+    url.searchParams.delete("code");
+    url.searchParams.delete("state");
+    window.history.replaceState({}, "", url.toString());
+    localStorage.removeItem(LS_VERIFIER);
 
     const body = new URLSearchParams({
       grant_type: "authorization_code",
@@ -127,12 +140,6 @@ export class SpotifyNowPlayingProvider implements NowPlayingProvider {
     }
     const token = (await res.json()) as TokenResponse;
     this.storeToken(token);
-
-    // Clean ?code=… out of the URL so refreshes don't try to reuse it.
-    url.searchParams.delete("code");
-    url.searchParams.delete("state");
-    window.history.replaceState({}, "", url.toString());
-    localStorage.removeItem(LS_VERIFIER);
     return true;
   }
 
