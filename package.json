@@ -1,0 +1,17 @@
+{
+  "name": "aura",
+  "private": true,
+  "version": "0.0.1",
+  "description": "AURA — cinematic real-time music visualizer",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @aura/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.1.3"
+}
