@@ -53,7 +53,7 @@ pnpm install
 pnpm dev
 ```
 
-Open **http://localhost:5173/** in Chrome / Edge / Brave / Arc — Firefox & Safari can't reliably capture tab audio. Click **Try a demo track** to see it move, or **◉ Capture from a tab** to point it at your music.
+Open **https://localhost:5173/** in Chrome / Edge / Brave / Arc — Firefox & Safari can't reliably capture tab audio. The dev server runs on HTTPS with a self-signed certificate (Spotify OAuth requires HTTPS); on first visit the browser will warn — click **Advanced → Proceed to localhost**. Then click **Try a demo track** to see it move, or **◉ Capture from a tab** to point it at your music.
 
 Need the toolchain? [Node 20+](https://nodejs.org), then `corepack enable && corepack prepare pnpm@latest --activate`.
 
@@ -129,12 +129,14 @@ aura/
 AURA reads Spotify's still-live `currently-playing` endpoint for title / artist / album art. Audio still comes from tab capture — Spotify can't and won't ship beats anymore.
 
 1. Open [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → **Create app**.
-2. **Redirect URI** must be exactly `http://localhost:5173/` (Spotify accepts plain `http://` only for `localhost` — that's why running on your own machine is the easy path).
+2. **Redirect URI** must be exactly `https://localhost:5173/` (HTTPS — Spotify dropped plain `http://localhost` support for new apps in 2025).
 3. Tick **Web API**, save, copy the **Client ID**.
 4. In AURA, click **Connect Spotify (now-playing)** → paste the Client ID → **Connect → Spotify** → Agree.
 5. Open Spotify Web Player or the desktop app, play a track.
 6. In AURA: **◉ Capture from a tab** → pick the Spotify tab → **tick "Share tab audio"** in the picker.
 7. Track title + artist + album art appear top-left. The kaleidoscope shifts to the album's colors.
+
+> **Fallback if the self-signed HTTPS cert is too annoying:** register `http://127.0.0.1:5173/` as the redirect URI instead (Spotify still accepts plain HTTP on the explicit loopback IP). Then open `http://127.0.0.1:5173/` in your browser. No cert warning, no HTTPS plugin needed.
 
 ---
 
