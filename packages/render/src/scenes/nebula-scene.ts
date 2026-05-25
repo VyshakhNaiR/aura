@@ -343,197 +343,171 @@ float fbm(vec2 p) {
   return v;
 }
 
-vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
-  return a + b * cos(6.28318 * (c * t + d));
+// Divergence-free 2D velocity field. We sample a scalar potential and
+// take a finite-difference gradient rotated 90° — gives organic, fluid
+// flow without sources or sinks. The result is what makes the scene
+// "ink in water" / aurora curtains, not "rotating kaleidoscope".
+vec2 curlFlow(vec2 p, float t) {
+  const float e = 0.085;
+  vec2 q = p + vec2(t * 0.13, t * -0.07);
+  float n1 = noise2(q + vec2(0.0, e));
+  float n2 = noise2(q - vec2(0.0, e));
+  float n3 = noise2(q + vec2(e, 0.0));
+  float n4 = noise2(q - vec2(e, 0.0));
+  return vec2((n1 - n2), -(n3 - n4)) / (2.0 * e);
 }
 
-// Three mood palettes — blended by (energy, brightness) → 2D weights.
-vec3 paletteCool(float t) {
-  return palette(t,
-    vec3(0.18, 0.20, 0.45),
-    vec3(0.45, 0.55, 0.65),
-    vec3(1.0,  1.0,  1.0),
-    vec3(0.00, 0.18, 0.35));
-}
-vec3 paletteWarm(float t) {
-  return palette(t,
-    vec3(0.65, 0.40, 0.45),
-    vec3(0.50, 0.40, 0.35),
-    vec3(1.0,  1.0,  1.0),
-    vec3(0.00, 0.25, 0.50));
-}
-vec3 paletteIrid(float t) {
-  return palette(t,
-    vec3(0.55, 0.50, 0.55),
-    vec3(0.55, 0.45, 0.55),
-    vec3(1.0,  1.0,  0.5),
-    vec3(0.80, 0.90, 0.30));
+// Two-color mood gradient. Three "stops" — shadow, mid, highlight —
+// blended cool→warm by energy. No more 3-palette switching: just a
+// coherent ramp like a graded photograph.
+vec3 moodGradient(float t, float energy) {
+  vec3 shadowCool = vec3(0.025, 0.045, 0.110);
+  vec3 midCool    = vec3(0.110, 0.250, 0.490);
+  vec3 highCool   = vec3(0.620, 0.820, 0.980);
+
+  vec3 shadowWarm = vec3(0.090, 0.020, 0.080);
+  vec3 midWarm    = vec3(0.480, 0.120, 0.270);
+  vec3 highWarm   = vec3(1.000, 0.690, 0.480);
+
+  vec3 shadow = mix(shadowCool, shadowWarm, energy);
+  vec3 mid    = mix(midCool,    midWarm,    energy);
+  vec3 high   = mix(highCool,   highWarm,   energy);
+
+  // Two-stop interpolation through the three colors.
+  t = clamp(t, 0.0, 1.0);
+  return t < 0.5
+    ? mix(shadow, mid,  smoothstep(0.0, 0.5, t))
+    : mix(mid,    high, smoothstep(0.5, 1.0, t));
 }
 
-// Album-art palette sampler — 4 colors lerped in a wrap-around loop so
-// any t produces a smooth color walk through whatever the current track
-// is wearing on its cover.
-vec3 samplePaletteAlbum(float t) {
-  vec3 c0 = vec3(u_albumColors[0],  u_albumColors[1],  u_albumColors[2]);
-  vec3 c1 = vec3(u_albumColors[3],  u_albumColors[4],  u_albumColors[5]);
-  vec3 c2 = vec3(u_albumColors[6],  u_albumColors[7],  u_albumColors[8]);
-  vec3 c3 = vec3(u_albumColors[9],  u_albumColors[10], u_albumColors[11]);
-  float ft = fract(t) * 4.0;
-  float seg = floor(ft);
-  float k = fract(ft);
-  k = k * k * (3.0 - 2.0 * k); // smoothstep ease
-  vec3 a = c0; vec3 b = c1;
-  if (seg < 0.5) { a = c0; b = c1; }
-  else if (seg < 1.5) { a = c1; b = c2; }
-  else if (seg < 2.5) { a = c2; b = c3; }
-  else { a = c3; b = c0; }
-  return mix(a, b, k);
+// Album palette as shadow/mid/high stops instead of a rotating wheel.
+// Index 0 = shadow, 1 = mid, 2 = highlight. (4th color unused; the
+// extractor returns up to 4 by popularity so the most-frequent three
+// drive the gradient.)
+vec3 albumGradient(float t) {
+  vec3 shadow = vec3(u_albumColors[0], u_albumColors[1], u_albumColors[2]) * 0.35;
+  vec3 mid    = vec3(u_albumColors[3], u_albumColors[4], u_albumColors[5]);
+  vec3 high   = vec3(u_albumColors[6], u_albumColors[7], u_albumColors[8]) * 1.05;
+  t = clamp(t, 0.0, 1.0);
+  return t < 0.5
+    ? mix(shadow, mid,  smoothstep(0.0, 0.5, t))
+    : mix(mid,    high, smoothstep(0.5, 1.0, t));
+}
+
+// Sample one "stratum" of the aurora field at a given scale + time speed.
+// scale  : noise frequency multiplier (smaller = larger features)
+// timeMul: how fast this layer evolves (smaller = slower)
+// warpAmp: amplitude of the curl-flow domain warp
+// thresh : density threshold (smoothstep lower/upper) — controls how
+//          much of the layer reads as "filled" vs "transparent"
+float aurora(vec2 uv, float scale, float timeMul, float warpAmp, vec2 thresh) {
+  vec2 p = uv * scale;
+  // Domain warp via curl flow — gives the field its asymmetric drift.
+  vec2 v = curlFlow(p, u_time * timeMul) * warpAmp;
+  // Sample fbm at the advected position; that's the density.
+  float d = fbm(p + v);
+  d = d * 0.5 + 0.5;
+  return smoothstep(thresh.x, thresh.y, d);
 }
 
 void main() {
   vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
   vec2 uv0 = (vUv - 0.5) * aspect;
 
-  // Mouse parallax: drift the centre subtly toward the pointer.
-  vec2 mouseDrift = u_mouse * vec2(0.10, 0.10);
-  uv0 -= mouseDrift;
+  // Mouse parallax — gentler, asymmetric (more on X than Y).
+  uv0 -= u_mouse * vec2(0.09, 0.06);
 
-  // Slow ambient current — always-on gentle drift so the scene has
-  // continuous motion even at low intensity. Two perpendicular slow sines
-  // produce a soft "wind" that the whole image rides on.
-  vec2 current = vec2(
-    sin(u_time * 0.07) + 0.6 * sin(u_time * 0.013),
-    cos(u_time * 0.05) + 0.5 * sin(u_time * 0.021)
-  ) * 0.045;
-  uv0 += current;
+  // Slow always-on drift current so the field is alive even without audio.
+  uv0 += vec2(
+    sin(u_time * 0.06) + 0.55 * sin(u_time * 0.011),
+    cos(u_time * 0.043) + 0.45 * sin(u_time * 0.018)
+  ) * 0.035;
 
-  // Beat camera kick: scaled by intensity so calm mode barely punches.
-  float kickZoom = 1.0 - u_beatKick * 0.045 * u_intensity;
+  // Beat zoom kick — restrained, intensity-scaled.
+  float kickZoom = 1.0 - u_beatKick * 0.04 * u_intensity;
   uv0 *= kickZoom;
 
-  // Radial shockwave on beat — distort uv along radial direction by a
-  // travelling sine wave whose ridge expands outward as the kick fades.
-  // Scaled by intensity so it's barely noticeable in calm mode.
   float r0 = length(uv0);
-  float shockR = (1.0 - u_beatKick) * 0.9;
-  float shockWidth = 0.08 + u_beatKick * 0.05;
-  float shock = exp(-pow((r0 - shockR) / shockWidth, 2.0)) * u_beatKick * 0.05 * u_intensity;
-  vec2 dirOut = (r0 > 0.0001) ? uv0 / r0 : vec2(0.0);
-  uv0 += dirOut * shock;
-  r0 = length(uv0);
-
-  // -------- Layer 1: deep background nebula (slow, large scale, dark) --------
-  vec2 bgUv = uv0 * 0.55;
-  float bgT = u_time * 0.03;
-  vec2 bgWarp = vec2(fbm(bgUv + vec2(0.0, bgT)), fbm(bgUv + vec2(7.1, -bgT))) * 0.6;
-  float bg = fbm(bgUv + bgWarp + vec2(0.0, bgT * 0.5));
-  bg = bg * 0.5 + 0.5;
-  vec3 bgCol = paletteCool(bg + u_centroid * 0.2) * 0.35;
-
-  // -------- Layer 2: kaleidoscope mid (the headline pattern) --------
-  vec2 uv = uv0;
-  float ang = atan(uv.y, uv.x);
-  float radius = length(uv);
-  // Slower, more meditative rotation — busyness still adds drift but the
-  // baseline is calmer so the scene feels like it's breathing, not spinning.
-  float spin = u_time * 0.022 + u_busyness * 0.22;
-  ang += spin;
-  float N = 6.0;
-  float sector = 2.0 * PI / N;
-  ang = mod(ang, sector);
-  ang = abs(ang - sector * 0.5);
-  uv = vec2(cos(ang), sin(ang)) * radius;
-
-  float bass = u_bands[1];
+  float bass   = u_bands[1];
   float treble = u_bands[5];
 
-  float zoom = 1.05 + sin(u_time * 0.045) * 0.14 + bass * 0.42;
-  vec2 p = uv * zoom;
-  float t2 = u_time * (0.045 + u_dynamics * 0.035);
-  float warpAmt = 0.5 + u_brightness * 0.55 + treble * 0.5;
-  vec2 q  = vec2(fbm(p + vec2(0.0, t2)), fbm(p + vec2(5.2, -t2))) * warpAmt;
-  vec2 s  = vec2(fbm(p + q + vec2(1.7, -t2)), fbm(p + q + vec2(9.2, t2)))
-            * (0.55 + u_busyness * 0.7);
-  float f = fbm(p + s);
-  f = f * 0.5 + 0.5;
+  // ----- THREE DEPTH STRATA -----
+  // Back: large, very slow, soft — establishes background tone.
+  // Mid : the headline layer; primary signal, medium scale, beat-aware.
+  // Front: smaller features, sharper edges, more reactive — "wisps".
+  //
+  // Each stratum is independently warped so they appear to drift at
+  // different rates → parallax depth without an actual 3D camera.
+  float dBack = aurora(uv0, 0.55, 0.045, 0.45 + u_brightness * 0.3,
+                       vec2(0.30, 0.78));
+  float dMid  = aurora(uv0, 1.25, 0.085 + u_dynamics * 0.05,
+                       0.55 + treble * 0.40 + bass * 0.20,
+                       vec2(0.42, 0.80));
+  float dFront = aurora(uv0, 2.40, 0.13 + u_busyness * 0.06,
+                        0.65 + treble * 0.55,
+                        vec2(0.55, 0.82));
 
-  // 2D mood-weighted palette blend: cool ↔ warm by energy, with iridescent
-  // accent rising with brightness.
-  vec3 cool = paletteCool(f + u_centroid * 0.25 + u_time * 0.03);
-  vec3 warm = paletteWarm(f * 1.2 + u_time * 0.05);
-  vec3 irid = paletteIrid(f * 0.9 + u_time * 0.04);
+  // ----- COLOR — coherent gradient, mood-driven warmth -----
+  float warmth = clamp(u_energy * 0.75 + u_dynamics * 0.4, 0.0, 1.0);
 
-  float warmth   = clamp(u_energy * 0.8 + u_dynamics * 0.45, 0.0, 1.0);
-  float iridMix  = clamp(u_brightness * 0.6 + u_busyness * 0.25, 0.0, 1.0);
+  // Each stratum takes a different position in the gradient. The back
+  // layer biases toward shadows (deep tones), front toward highlights.
+  vec3 cBack  = moodGradient(dBack * 0.55 + 0.05 + u_centroid * 0.10, warmth);
+  vec3 cMid   = moodGradient(dMid  * 0.70 + 0.15, warmth);
+  vec3 cFront = moodGradient(dFront * 0.85 + 0.20, warmth);
 
-  vec3 mid = mix(cool, warm, warmth);
-  mid = mix(mid, irid, iridMix * 0.45);
-
-  // If we have an album-art palette, blend toward it. The album palette
-  // walks with the pattern (uses f as the lookup) so the visual literally
-  // takes on the colors of the album cover.
+  // If we have an album-art palette, override the gradient with it
+  // (eased in by u_albumStrength).
   if (u_albumStrength > 0.0) {
-    vec3 albumCol = samplePaletteAlbum(f + u_time * 0.04);
-    mid = mix(mid, albumCol, u_albumStrength);
+    cBack  = mix(cBack,  albumGradient(dBack  * 0.55 + 0.05), u_albumStrength);
+    cMid   = mix(cMid,   albumGradient(dMid   * 0.70 + 0.15), u_albumStrength);
+    cFront = mix(cFront, albumGradient(dFront * 0.85 + 0.20), u_albumStrength);
   }
 
-  // Calmer base multiplier: ambient floor stays consistent, RMS only
-  // adds modest brightening. (Was 0.55 + rms * 1.6 — way too punchy.)
-  mid *= 0.42 + u_rms * 0.75;
-  // Specular highlights — dimmer + intensity-scaled so calm mode isn't blinding.
-  mid += vec3(0.55, 0.50, 0.85) * pow(f, 8.0) * (0.18 + treble * 0.7) * (0.4 + u_intensity * 0.8);
+  // Composite back→front. Each layer is a soft additive contribution
+  // weighted by its own density.
+  vec3 col = cBack * dBack * 0.55
+           + cMid  * dMid  * 0.85
+           + cFront * dFront * 0.95;
 
-  // -------- Layer 3: foreground sparkles (high-freq dots that twinkle) --------
-  // Sparkles are the worst office-flashing offender — sharper pow curve
-  // (fewer pixels light up) and capped by intensity.
-  vec2 spUv = uv0 * 22.0;
-  float spT = u_time * 0.6 + u_beatPhase * 6.28;
-  float sp = fbm(spUv + vec2(spT * 0.2, -spT * 0.1));
-  float sparkle = pow(max(0.0, sp), 18.0) * (0.18 + treble * 0.7 + u_beatKick * 0.25);
-  vec3 sparkleCol = vec3(0.9, 0.78, 1.05) * sparkle * (0.3 + u_intensity * 0.9);
+  // RMS pushes overall luminance gently. Capped so loud peaks don't blast.
+  col *= 0.70 + u_rms * 0.55;
 
-  // -------- Composite --------
-  vec3 col = bgCol + mid + sparkleCol;
+  // Specular highlights only on the front layer's brightest crests —
+  // gives "wet ink" / "silk" surface feel. Intensity-gated.
+  col += vec3(0.55, 0.60, 0.90) * pow(dFront, 6.0)
+       * (0.10 + treble * 0.55) * (0.45 + u_intensity * 0.85);
 
-  // Iridescent angular rim — dimmer + intensity-aware so calm mode keeps
-  // saturation but loses the spotlight effect.
-  float rimMask = pow(f, 6.0);
-  float rimAng = atan(uv0.y, uv0.x);
-  vec3 rim = vec3(
-    0.5 + 0.5 * sin(rimAng + u_time * 0.45),
-    0.5 + 0.5 * sin(rimAng + u_time * 0.45 + 2.094),
-    0.5 + 0.5 * sin(rimAng + u_time * 0.45 + 4.188)
-  );
-  col += rim * rimMask * (0.12 + u_brightness * 0.30) * (0.5 + u_intensity * 0.6);
-
-  // Beat rings — pre-fold radial pulses. Halved brightness + intensity gate.
+  // ----- BEAT RINGS — palette-coherent, no garish magenta anymore -----
   float ringSum = 0.0;
   for (int i = 0; i < 4; i++) {
     float age = u_ringAges[i];
-    float pulse = u_ringPulses[i];
-    float radR = age * 0.9;
-    float width = 0.05 + age * 0.07;
-    float ring = exp(-pow((length(uv0) - radR) / width, 2.0));
-    ringSum += ring * pulse;
+    float radR = age * 0.85;
+    float width = 0.06 + age * 0.07;
+    ringSum += exp(-pow((r0 - radR) / width, 2.0)) * u_ringPulses[i];
   }
-  col += vec3(1.0, 0.78, 1.35) * ringSum * 0.45 * u_intensity;
+  vec3 ringTint = moodGradient(0.92, warmth);
+  col += ringTint * ringSum * 0.55 * u_intensity;
 
-  // Vignette — stronger so edges stay dark and don't wash out other things
-  // on your screen.
-  float vig = smoothstep(1.15, 0.20, length(uv0));
+  // ----- VIGNETTE — strong, oval, soft falloff — sells the depth -----
+  float vigR = length(uv0 * vec2(0.92, 1.06));
+  float vig = smoothstep(1.18, 0.18, vigR);
   col *= vig;
 
-  // Subtle film grain.
-  float grain = (hash22(vUv * u_resolution + u_time).x - 0.5) * 0.018;
+  // ----- DUST / GRAIN -----
+  // Two scales of grain: micro-grain for film texture, plus a sparser
+  // luminous dust at lower frequency that drifts with the scene.
+  float grain = (hash22(vUv * u_resolution + u_time).x - 0.5) * 0.020;
+  float dustSeed = hash22(floor(vUv * u_resolution / 3.0) + floor(u_time * 0.5)).x;
+  float dust = step(0.998, dustSeed) * 0.12;
   col += grain;
+  col += vec3(1.0, 0.95, 0.85) * dust;
 
-  // Cinematic lift / gamma / gain color grade. Crushes shadows toward
-  // a cool teal, warms midtones, lifts highlights into peach — the
-  // "Hollywood blockbuster" curve, gently applied.
+  // ----- LGG CINEMATIC GRADE -----
   col = max(col, 0.0);
-  vec3 lift = vec3(-0.012, -0.005, 0.018);
-  vec3 gammaCurve = vec3(0.95, 0.95, 0.88);
-  vec3 gain = vec3(1.04, 1.02, 0.98);
+  vec3 lift  = vec3(-0.010, -0.004, 0.014);
+  vec3 gammaCurve = vec3(0.96, 0.95, 0.90);
+  vec3 gain  = vec3(1.04, 1.02, 0.98);
   col = pow(col, gammaCurve);
   col = col * gain + lift;
 
