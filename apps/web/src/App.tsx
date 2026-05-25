@@ -15,9 +15,14 @@ import {
 } from "@aura/core";
 import {
   SpotifyNowPlayingProvider,
+  ActivityFeederNowPlayingProvider,
   extractPalette,
   type NowPlaying,
+  type NowPlayingProvider,
 } from "@aura/metadata";
+
+const LS_BRIDGE_URL = "aura.bridge.url";
+const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8787/spotify/current";
 
 type SceneId = "nebula" | "bars";
 
@@ -51,25 +56,22 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const liveRef = useRef<Live | null>(null);
   const spotifyRef = useRef<SpotifyNowPlayingProvider | null>(null);
+  const feederRef = useRef<ActivityFeederNowPlayingProvider | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [trackName, setTrackName] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(null);
   const [spotifyConnected, setSpotifyConnected] = useState(false);
+  const [feederConnected, setFeederConnected] = useState(false);
   const [showSpotifySetup, setShowSpotifySetup] = useState(false);
+  const [showBridgeSetup, setShowBridgeSetup] = useState(false);
 
-  // -------------------- Spotify provider lifecycle --------------------
+  // -------------------- Now-playing wiring (shared) --------------------
 
-  const ensureSpotifyProvider = (): SpotifyNowPlayingProvider | null => {
-    if (spotifyRef.current) return spotifyRef.current;
-    const clientId = localStorage.getItem(LS_CLIENT_ID);
-    if (!clientId) return null;
-    const provider = new SpotifyNowPlayingProvider(clientId, DEFAULT_REDIRECT);
-    spotifyRef.current = provider;
+  const wireNowPlaying = (provider: NowPlayingProvider): void => {
     provider.subscribe((np) => {
       setNowPlaying(np);
-      // Drive album palette when we get a new art URL.
       const live = liveRef.current;
       const nebula = live?.currentNebula;
       if (nebula && np.artUrl) {
@@ -80,12 +82,57 @@ export default function App() {
             }
           })
           .catch(() => {
-            // Spotify art is on i.scdn.co with permissive CORS — but if
-            // it ever fails, fall back silently to the procedural palette.
+            // Art CORS or load fail — fall back silently.
           });
       }
     });
+  };
+
+  // -------------------- Spotify (OAuth) provider lifecycle --------------------
+
+  const ensureSpotifyProvider = (): SpotifyNowPlayingProvider | null => {
+    if (spotifyRef.current) return spotifyRef.current;
+    const clientId = localStorage.getItem(LS_CLIENT_ID);
+    if (!clientId) return null;
+    const provider = new SpotifyNowPlayingProvider(clientId, DEFAULT_REDIRECT);
+    spotifyRef.current = provider;
+    wireNowPlaying(provider);
     return provider;
+  };
+
+  // -------------------- ActivityFeeder bridge (no-OAuth) --------------------
+
+  const ensureFeederProvider = (): ActivityFeederNowPlayingProvider => {
+    if (feederRef.current) return feederRef.current;
+    const url = localStorage.getItem(LS_BRIDGE_URL) ?? DEFAULT_BRIDGE_URL;
+    const provider = new ActivityFeederNowPlayingProvider(url);
+    feederRef.current = provider;
+    wireNowPlaying(provider);
+    return provider;
+  };
+
+  const handleBridgeConnect = async (url: string) => {
+    setError(null);
+    localStorage.setItem(LS_BRIDGE_URL, url);
+    feederRef.current?.stop();
+    feederRef.current = null;
+    const provider = ensureFeederProvider();
+    const probe = await provider.probe();
+    if (!probe.ok) {
+      setError(
+        `Couldn't reach the bridge at ${url}.${probe.error ? " " + probe.error + "." : ""} Is \`activityfeeder bridge\` running?`,
+      );
+      return;
+    }
+    setFeederConnected(true);
+    await provider.start();
+  };
+
+  const handleBridgeDisconnect = () => {
+    feederRef.current?.stop();
+    feederRef.current = null;
+    setFeederConnected(false);
+    setNowPlaying(null);
   };
 
   // Boot: handle Spotify ?code= redirect if present, then start polling.
@@ -108,6 +155,18 @@ export default function App() {
       if (provider?.isAuthorized()) {
         setSpotifyConnected(true);
         await provider.start();
+      }
+
+      // Auto-reconnect to the ActivityFeeder bridge if it was used last
+      // session and is still up. Probes once; silent on failure so a
+      // stopped bridge doesn't spam errors.
+      if (localStorage.getItem(LS_BRIDGE_URL)) {
+        const feeder = ensureFeederProvider();
+        const probe = await feeder.probe();
+        if (probe.ok) {
+          setFeederConnected(true);
+          await feeder.start();
+        }
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -313,11 +372,14 @@ export default function App() {
           dragging={dragging}
           error={error}
           spotifyConnected={spotifyConnected}
+          feederConnected={feederConnected}
           onPick={() => fileInputRef.current?.click()}
           onDemo={() => void handleDemo()}
           onTab={() => void handleTabCapture()}
           onSpotify={() => setShowSpotifySetup(true)}
           onSpotifyLogout={handleSpotifyLogout}
+          onBridge={() => setShowBridgeSetup(true)}
+          onBridgeLogout={handleBridgeDisconnect}
         />
       )}
       {trackName && nowPlaying && nowPlaying.title && (
@@ -329,6 +391,15 @@ export default function App() {
           onConnect={async (id) => {
             setShowSpotifySetup(false);
             await handleSpotifyConnect(id);
+          }}
+        />
+      )}
+      {showBridgeSetup && (
+        <BridgeSetupModal
+          onClose={() => setShowBridgeSetup(false)}
+          onConnect={async (url) => {
+            setShowBridgeSetup(false);
+            await handleBridgeConnect(url);
           }}
         />
       )}
@@ -415,18 +486,24 @@ function StartOverlay({
   onTab,
   onSpotify,
   onSpotifyLogout,
+  onBridge,
+  onBridgeLogout,
   dragging,
   error,
   spotifyConnected,
+  feederConnected,
 }: {
   onPick: () => void;
   onDemo: () => void;
   onTab: () => void;
   onSpotify: () => void;
   onSpotifyLogout: () => void;
+  onBridge: () => void;
+  onBridgeLogout: () => void;
   dragging: boolean;
   error: string | null;
   spotifyConnected: boolean;
+  feederConnected: boolean;
 }) {
   return (
     <div
@@ -471,21 +548,31 @@ function StartOverlay({
           </button>
         </div>
 
-        <div style={{ marginTop: 24, opacity: 0.92 }}>
-          {spotifyConnected ? (
+        <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 10, alignItems: "center" }}>
+          {feederConnected ? (
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", alignItems: "center", fontSize: 12 }}>
+              <span style={{ color: "#a8ffce" }}>● live from ActivityFeeder bridge</span>
+              <button onClick={onBridgeLogout} style={linkButtonStyle}>disconnect</button>
+            </div>
+          ) : spotifyConnected ? (
             <div style={{ display: "flex", gap: 10, justifyContent: "center", alignItems: "center", fontSize: 12 }}>
               <span style={{ color: "#1ed760" }}>● connected to Spotify</span>
               <button onClick={onSpotifyLogout} style={linkButtonStyle}>disconnect</button>
             </div>
           ) : (
-            <button onClick={onSpotify} style={spotifyButtonStyle}>
-              Connect Spotify (now-playing)
-            </button>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button onClick={onBridge} style={bridgeButtonStyle} title="If you run ActivityFeeder locally, this is the easiest path.">
+                Use ActivityFeeder bridge
+              </button>
+              <button onClick={onSpotify} style={spotifyButtonStyle}>
+                Connect Spotify (OAuth)
+              </button>
+            </div>
           )}
         </div>
 
         <p style={{ opacity: 0.45, marginTop: 18, fontSize: 12, lineHeight: 1.5 }}>
-          Tab capture lets AURA hear <em>any</em> web player. Connect Spotify on top to get track titles & album-art-derived palettes.
+          Tab capture lets AURA hear <em>any</em> web player. The bridge (or Spotify OAuth) layers in track titles & album-art-derived palettes.
           <br />Drop an audio file anywhere. Press 1 / 2 to switch scenes.
         </p>
         {error && (
@@ -553,6 +640,65 @@ function SpotifySetupModal({ onClose, onConnect }: { onClose: () => void; onConn
   );
 }
 
+function BridgeSetupModal({
+  onClose,
+  onConnect,
+}: {
+  onClose: () => void;
+  onConnect: (url: string) => void;
+}) {
+  const [url, setUrl] = useState(localStorage.getItem(LS_BRIDGE_URL) ?? DEFAULT_BRIDGE_URL);
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(5,6,10,0.75)",
+        backdropFilter: "blur(6px)", zIndex: 100, display: "grid", placeItems: "center",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#0c0f17", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 12,
+          padding: 24, maxWidth: 560, width: "calc(100% - 32px)", color: "#e9f0f8",
+          font: "13px/1.55 -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
+        }}
+      >
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, letterSpacing: "0.04em" }}>Use ActivityFeeder bridge</h2>
+        <p style={{ opacity: 0.75, marginTop: 12 }}>
+          Skip Spotify OAuth entirely. AURA reads now-playing data from a local
+          bridge that piggybacks on the ActivityFeeder's existing Spotify auth.
+        </p>
+        <ol style={{ opacity: 0.85, paddingLeft: 18, marginTop: 14 }}>
+          <li>
+            In a terminal: <pre style={{ display: "inline", background: "#000", padding: "2px 6px", borderRadius: 4 }}>activityfeeder bridge</pre>
+            <br />
+            <span style={{ opacity: 0.7, fontSize: 12 }}>Boots a localhost HTTP endpoint that exposes whatever your ActivityFeeder is showing in its Now Playing panel.</span>
+          </li>
+          <li>Leave the URL below alone unless you started the bridge on a non-default host/port.</li>
+        </ol>
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder={DEFAULT_BRIDGE_URL}
+          style={{
+            display: "block", width: "100%", boxSizing: "border-box", marginTop: 12,
+            background: "#05060a", border: "1px solid rgba(255,255,255,0.18)",
+            color: "#e9f0f8", padding: "10px 12px", borderRadius: 8, font: "inherit",
+            letterSpacing: "0.04em",
+          }}
+        />
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18 }}>
+          <button onClick={onClose} style={secondaryButtonStyle}>Cancel</button>
+          <button onClick={() => url.trim() && onConnect(url.trim())} style={bridgeButtonStyle}>
+            Connect → bridge
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const primaryButtonStyle: React.CSSProperties = {
   padding: "12px 26px", background: "rgba(168,255,206,0.16)", border: "1px solid rgba(168,255,206,0.65)",
   color: "#a8ffce", borderRadius: 8, cursor: "pointer", font: "inherit", letterSpacing: "0.12em",
@@ -567,6 +713,12 @@ const spotifyButtonStyle: React.CSSProperties = {
   padding: "10px 22px", background: "#1ed760", border: "1px solid #1ed760", color: "#05060a",
   borderRadius: 8, cursor: "pointer", font: "inherit", letterSpacing: "0.08em", fontSize: 12,
   textTransform: "uppercase", fontWeight: 600,
+};
+const bridgeButtonStyle: React.CSSProperties = {
+  padding: "10px 22px", background: "rgba(168,255,206,0.16)",
+  border: "1px solid rgba(168,255,206,0.65)", color: "#a8ffce",
+  borderRadius: 8, cursor: "pointer", font: "inherit", letterSpacing: "0.08em",
+  fontSize: 12, textTransform: "uppercase", fontWeight: 600,
 };
 const linkButtonStyle: React.CSSProperties = {
   background: "transparent", border: "none", color: "rgba(232,240,248,0.65)",
